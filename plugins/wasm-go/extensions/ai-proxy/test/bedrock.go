@@ -1581,6 +1581,101 @@ func RunBedrockOnHttpResponseBodyTests(t *testing.T) {
 			require.False(t, hasPromptTokensDetails, "prompt_tokens_details should be omitted when cacheReadInputTokens is zero")
 		})
 
+		t.Run("bedrock reasoning content should remain structured for anthropic messages", func(t *testing.T) {
+			host, status := test.NewTestHost(bedrockApiTokenConfig)
+			defer host.Reset()
+			require.Equal(t, types.OnPluginStartStatusOK, status)
+
+			action := host.CallOnHttpRequestHeaders([][2]string{
+				{":authority", "example.com"},
+				{":path", "/v1/messages"},
+				{":method", "POST"},
+				{"Content-Type", "application/json"},
+			})
+			require.Equal(t, types.HeaderStopIteration, action)
+
+			requestBody := `{
+				"model": "claude-sonnet-4-6",
+				"max_tokens": 1600,
+				"thinking": {
+					"type": "enabled",
+					"budget_tokens": 1024
+				},
+				"messages": [
+					{
+						"role": "user",
+						"content": "Return ok."
+					}
+				]
+			}`
+			action = host.CallOnHttpRequestBody([]byte(requestBody))
+			require.Equal(t, types.ActionContinue, action)
+
+			host.SetProperty([]string{"response", "code_details"}, []byte("via_upstream"))
+			action = host.CallOnHttpResponseHeaders([][2]string{
+				{":status", "200"},
+				{"Content-Type", "application/json"},
+			})
+			require.Equal(t, types.ActionContinue, action)
+
+			responseBody := `{
+				"output": {
+					"message": {
+						"role": "assistant",
+						"content": [
+							{
+								"reasoningContent": {
+									"reasoningText": {
+										"text": "I should answer with ok.",
+										"signature": "bedrock-thinking-signature"
+									}
+								}
+							},
+							{
+								"reasoningContent": {
+									"reasoningText": {
+										"text": " Then answer."
+									}
+								}
+							},
+							{
+								"text": "ok"
+							}
+						]
+					}
+				},
+				"stopReason": "end_turn",
+				"usage": {
+					"inputTokens": 10,
+					"outputTokens": 15,
+					"totalTokens": 25
+				}
+			}`
+			action = host.CallOnHttpResponseBody([]byte(responseBody))
+			require.Equal(t, types.ActionContinue, action)
+
+			transformedResponseBody := host.GetResponseBody()
+			require.NotNil(t, transformedResponseBody)
+			require.NotContains(t, string(transformedResponseBody), "<think>")
+			require.NotContains(t, string(transformedResponseBody), "</think>")
+
+			var responseMap map[string]interface{}
+			err := json.Unmarshal(transformedResponseBody, &responseMap)
+			require.NoError(t, err)
+
+			content := responseMap["content"].([]interface{})
+			require.Len(t, content, 2)
+
+			thinkingBlock := content[0].(map[string]interface{})
+			require.Equal(t, "thinking", thinkingBlock["type"])
+			require.Equal(t, "I should answer with ok. Then answer.", thinkingBlock["thinking"])
+			require.Equal(t, "bedrock-thinking-signature", thinkingBlock["signature"])
+
+			textBlock := content[1].(map[string]interface{})
+			require.Equal(t, "text", textBlock["type"])
+			require.Equal(t, "ok", textBlock["text"])
+		})
+
 		t.Run("bedrock response body with only cache write tokens should map to cached_tokens", func(t *testing.T) {
 			host, status := test.NewTestHost(bedrockApiTokenConfig)
 			defer host.Reset()
@@ -1667,6 +1762,100 @@ func RunBedrockOnStreamingResponseBodyTests(t *testing.T) {
 		t.Run("extract first data payload should return empty when no data line", func(t *testing.T) {
 			payload := extractFirstDataPayload([]byte("event: ping\n\n"))
 			require.Equal(t, "", payload)
+		})
+
+		t.Run("bedrock streaming reasoning should remain structured for anthropic messages", func(t *testing.T) {
+			host, status := test.NewTestHost(bedrockApiTokenConfig)
+			defer host.Reset()
+			require.Equal(t, types.OnPluginStartStatusOK, status)
+
+			action := host.CallOnHttpRequestHeaders([][2]string{
+				{":authority", "example.com"},
+				{":path", "/v1/messages"},
+				{":method", "POST"},
+				{"Content-Type", "application/json"},
+			})
+			require.Equal(t, types.HeaderStopIteration, action)
+
+			requestBody := `{
+				"model": "claude-sonnet-4-6",
+				"max_tokens": 1600,
+				"thinking": {
+					"type": "enabled",
+					"budget_tokens": 1024
+				},
+				"stream": true,
+				"messages": [
+					{
+						"role": "user",
+						"content": "Return ok."
+					}
+				]
+			}`
+			action = host.CallOnHttpRequestBody([]byte(requestBody))
+			require.Equal(t, types.ActionContinue, action)
+
+			host.SetProperty([]string{"response", "code_details"}, []byte("via_upstream"))
+			action = host.CallOnHttpResponseHeaders([][2]string{
+				{":status", "200"},
+				{"Content-Type", "application/vnd.amazon.eventstream"},
+			})
+			require.Equal(t, types.ActionContinue, action)
+
+			reasoningChunk := buildBedrockEventStreamMessage(t, map[string]interface{}{
+				"delta": map[string]interface{}{
+					"reasoningContent": map[string]interface{}{
+						"text": "I should answer with ok.",
+					},
+				},
+			})
+			action = host.CallOnHttpStreamingResponseBody(reasoningChunk, false)
+			require.Equal(t, types.ActionContinue, action)
+
+			reasoningResponseBody := host.GetResponseBody()
+			require.NotNil(t, reasoningResponseBody)
+			reasoningText := string(reasoningResponseBody)
+			require.NotContains(t, reasoningText, "<think>")
+			require.NotContains(t, reasoningText, "</think>")
+			require.Contains(t, reasoningText, `"type":"thinking"`)
+			require.Contains(t, reasoningText, `"type":"thinking_delta"`)
+			require.Contains(t, reasoningText, `"thinking":"I should answer with ok."`)
+
+			signatureChunk := buildBedrockEventStreamMessage(t, map[string]interface{}{
+				"delta": map[string]interface{}{
+					"reasoningContent": map[string]interface{}{
+						"signature": "bedrock-stream-signature",
+					},
+				},
+			})
+			action = host.CallOnHttpStreamingResponseBody(signatureChunk, false)
+			require.Equal(t, types.ActionContinue, action)
+
+			signatureResponseBody := host.GetResponseBody()
+			require.NotNil(t, signatureResponseBody)
+			signatureText := string(signatureResponseBody)
+			require.NotContains(t, signatureText, "<think>")
+			require.NotContains(t, signatureText, "</think>")
+			require.Contains(t, signatureText, `"type":"signature_delta"`)
+			require.Contains(t, signatureText, `"signature":"bedrock-stream-signature"`)
+
+			textChunk := buildBedrockEventStreamMessage(t, map[string]interface{}{
+				"delta": map[string]interface{}{
+					"text": "ok",
+				},
+			})
+			action = host.CallOnHttpStreamingResponseBody(textChunk, true)
+			require.Equal(t, types.ActionContinue, action)
+
+			textResponseBody := host.GetResponseBody()
+			require.NotNil(t, textResponseBody)
+			responseText := string(textResponseBody)
+			require.NotContains(t, responseText, "<think>")
+			require.NotContains(t, responseText, "</think>")
+			require.Contains(t, responseText, `"type":"content_block_stop"`)
+			require.Contains(t, responseText, `"type":"text_delta"`)
+			require.Contains(t, responseText, `"text":"ok"`)
+			require.Contains(t, responseText, `"type":"message_stop"`)
 		})
 
 		t.Run("bedrock streaming usage should map cached_tokens", func(t *testing.T) {

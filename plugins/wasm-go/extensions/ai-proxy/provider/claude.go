@@ -272,6 +272,7 @@ type claudeTextGenDelta struct {
 	Type         string          `json:"type,omitempty"`
 	Text         string          `json:"text,omitempty"`
 	Thinking     string          `json:"thinking,omitempty"`
+	Signature    string          `json:"signature,omitempty"`
 	PartialJson  string          `json:"partial_json,omitempty"`
 	StopReason   *string         `json:"stop_reason,omitempty"`
 	StopSequence json.RawMessage `json:"stop_sequence,omitempty"` // Use RawMessage to output explicit null

@@ -135,21 +135,12 @@ func (b *bedrockProvider) convertEventFromBedrockToOpenAI(ctx wrapper.HttpContex
 	}
 	if bedrockEvent.Delta != nil {
 		if bedrockEvent.Delta.ReasoningContent != nil {
-			var content string
-			if ctx.GetContext("thinking_start") == nil {
-				content += reasoningStartTag
-				ctx.SetContext("thinking_start", true)
+			chatChoice.Delta = &chatMessage{
+				ReasoningContent:   bedrockEvent.Delta.ReasoningContent.Text,
+				ReasoningSignature: bedrockEvent.Delta.ReasoningContent.Signature,
 			}
-			content += bedrockEvent.Delta.ReasoningContent.Text
-			chatChoice.Delta = &chatMessage{Content: &content}
 		} else if bedrockEvent.Delta.Text != nil {
-			var content string
-			if ctx.GetContext("thinking_start") != nil && ctx.GetContext("thinking_end") == nil {
-				content += reasoningEndTag
-				ctx.SetContext("thinking_end", true)
-			}
-			content += *bedrockEvent.Delta.Text
-			chatChoice.Delta = &chatMessage{Content: &content}
+			chatChoice.Delta = &chatMessage{Content: bedrockEvent.Delta.Text}
 		}
 		if bedrockEvent.Delta.ToolUse != nil {
 			chatChoice.Delta.ToolCalls = []toolCall{
@@ -908,25 +899,27 @@ func (b *bedrockProvider) buildBedrockTextGenerationRequest(origRequest *chatCom
 }
 
 func (b *bedrockProvider) buildChatCompletionResponse(ctx wrapper.HttpContext, bedrockResponse *bedrockConverseResponse) *chatCompletionResponse {
-	var outputContent, reasoningContent, normalContent string
+	var reasoningBuilder strings.Builder
+	var normalContentBuilder strings.Builder
+	var reasoningSignature string
 	for _, content := range bedrockResponse.Output.Message.Content {
 		if content.ReasoningContent != nil {
-			reasoningContent = content.ReasoningContent.ReasoningText.Text
+			reasoningBuilder.WriteString(content.ReasoningContent.ReasoningText.Text)
+			if content.ReasoningContent.ReasoningText.Signature != "" {
+				reasoningSignature = content.ReasoningContent.ReasoningText.Signature
+			}
 		}
 		if content.Text != "" {
-			normalContent = content.Text
+			normalContentBuilder.WriteString(content.Text)
 		}
-	}
-	if reasoningContent != "" {
-		outputContent = reasoningStartTag + reasoningContent + reasoningEndTag + normalContent
-	} else {
-		outputContent = normalContent
 	}
 	choice := chatCompletionChoice{
 		Index: 0,
 		Message: &chatMessage{
-			Role:    bedrockResponse.Output.Message.Role,
-			Content: outputContent,
+			Role:               bedrockResponse.Output.Message.Role,
+			Content:            normalContentBuilder.String(),
+			ReasoningContent:   reasoningBuilder.String(),
+			ReasoningSignature: reasoningSignature,
 		},
 		FinishReason: util.Ptr(stopReasonBedrock2OpenAI(bedrockResponse.StopReason)),
 	}

@@ -21,6 +21,7 @@ type ClaudeToOpenAIConverter struct {
 	nextContentIndex     int
 	thinkingBlockIndex   int
 	thinkingBlockStarted bool
+	thinkingBlockHasText bool
 	thinkingBlockStopped bool
 	textBlockIndex       int
 	textBlockStarted     bool
@@ -41,6 +42,52 @@ type toolCallInfo struct {
 	contentBlockStarted bool   // Whether content_block_start has been sent
 	contentBlockStopped bool   // Whether content_block_stop has been sent
 	cachedArguments     string // Cache arguments for this tool call
+}
+
+func (c *ClaudeToOpenAIConverter) appendMessageStartIfNeeded(responses *[]*claudeTextGenStreamResponse, openaiResponse *chatCompletionResponse) {
+	if c.messageStartSent {
+		return
+	}
+	c.messageId = openaiResponse.Id
+	c.messageStartSent = true
+	message := &claudeTextGenResponse{
+		Id:      openaiResponse.Id,
+		Type:    "message",
+		Role:    "assistant",
+		Model:   openaiResponse.Model,
+		Content: []claudeTextGenContent{},
+	}
+	if openaiResponse.Usage != nil {
+		message.Usage = claudeTextGenUsage{
+			InputTokens:  openaiResponse.Usage.PromptTokens,
+			OutputTokens: 0,
+		}
+	}
+	*responses = append(*responses, &claudeTextGenStreamResponse{
+		Type:    "message_start",
+		Message: message,
+	})
+	log.Debugf("[OpenAI->Claude] Generated message_start event for id: %s", openaiResponse.Id)
+}
+
+func (c *ClaudeToOpenAIConverter) appendThinkingBlockStartIfNeeded(responses *[]*claudeTextGenStreamResponse) {
+	if c.thinkingBlockStarted {
+		return
+	}
+	c.thinkingBlockIndex = c.nextContentIndex
+	c.nextContentIndex++
+	c.thinkingBlockStarted = true
+	log.Debugf("[OpenAI->Claude] Generated content_block_start event for thinking at index %d", c.thinkingBlockIndex)
+	emptyStr := ""
+	*responses = append(*responses, &claudeTextGenStreamResponse{
+		Type:  "content_block_start",
+		Index: &c.thinkingBlockIndex,
+		ContentBlock: &claudeTextGenContent{
+			Type:      "thinking",
+			Signature: &emptyStr,
+			Thinking:  &emptyStr,
+		},
+	})
 }
 
 // contentConversionResult represents the result of converting Claude content to OpenAI format
@@ -264,10 +311,10 @@ func (c *ClaudeToOpenAIConverter) ConvertOpenAIResponseToClaude(ctx wrapper.Http
 			}
 
 			if reasoningText != "" {
-				emptySignature := ""
+				signature := choice.Message.ReasoningSignature
 				contents = append(contents, claudeTextGenContent{
 					Type:      "thinking",
-					Signature: &emptySignature, // Use pointer for empty string
+					Signature: &signature,
 					Thinking:  &reasoningText,
 				})
 				log.Debugf("[OpenAI->Claude] Added thinking content: %s", reasoningText)
@@ -499,31 +546,7 @@ func (c *ClaudeToOpenAIConverter) buildClaudeStreamResponse(ctx wrapper.HttpCont
 	// Note: OpenRouter may send multiple messages with role but empty content at the start
 	// We only send message_start for the first one
 	if choice.Delta != nil && choice.Delta.Role != "" && !c.messageStartSent {
-		c.messageId = openaiResponse.Id
-		c.messageStartSent = true
-
-		message := &claudeTextGenResponse{
-			Id:      openaiResponse.Id,
-			Type:    "message",
-			Role:    "assistant",
-			Model:   openaiResponse.Model,
-			Content: []claudeTextGenContent{},
-		}
-
-		// Only include usage if it's available
-		if openaiResponse.Usage != nil {
-			message.Usage = claudeTextGenUsage{
-				InputTokens:  openaiResponse.Usage.PromptTokens,
-				OutputTokens: 0,
-			}
-		}
-
-		responses = append(responses, &claudeTextGenStreamResponse{
-			Type:    "message_start",
-			Message: message,
-		})
-
-		log.Debugf("[OpenAI->Claude] Generated message_start event for id: %s", openaiResponse.Id)
+		c.appendMessageStartIfNeeded(&responses, openaiResponse)
 	} else if choice.Delta != nil && choice.Delta.Role != "" && c.messageStartSent {
 		// Skip duplicate role messages from OpenRouter
 		log.Debugf("[OpenAI->Claude] Skipping duplicate role message for id: %s", openaiResponse.Id)
@@ -531,34 +554,21 @@ func (c *ClaudeToOpenAIConverter) buildClaudeStreamResponse(ctx wrapper.HttpCont
 
 	// Handle reasoning content (thinking) first - check both reasoning and reasoning_content fields
 	var reasoningText string
+	var reasoningSignature string
 	if choice.Delta != nil {
 		if choice.Delta.Reasoning != "" {
 			reasoningText = choice.Delta.Reasoning
 		} else if choice.Delta.ReasoningContent != "" {
 			reasoningText = choice.Delta.ReasoningContent
 		}
+		reasoningSignature = choice.Delta.ReasoningSignature
 	}
 
 	if reasoningText != "" {
 		log.Debugf("[OpenAI->Claude] Processing reasoning content delta: %s", reasoningText)
 
-		// Send content_block_start for thinking only once with dynamic index
-		if !c.thinkingBlockStarted {
-			c.thinkingBlockIndex = c.nextContentIndex
-			c.nextContentIndex++
-			c.thinkingBlockStarted = true
-			log.Debugf("[OpenAI->Claude] Generated content_block_start event for thinking at index %d", c.thinkingBlockIndex)
-			emptyStr := ""
-			responses = append(responses, &claudeTextGenStreamResponse{
-				Type:  "content_block_start",
-				Index: &c.thinkingBlockIndex,
-				ContentBlock: &claudeTextGenContent{
-					Type:      "thinking",
-					Signature: &emptyStr, // Use pointer for empty string output
-					Thinking:  &emptyStr, // Use pointer for empty string output
-				},
-			})
-		}
+		c.appendMessageStartIfNeeded(&responses, openaiResponse)
+		c.appendThinkingBlockStartIfNeeded(&responses)
 
 		// Send content_block_delta for thinking
 		log.Debugf("[OpenAI->Claude] Generated content_block_delta event with thinking: %s", reasoningText)
@@ -568,6 +578,31 @@ func (c *ClaudeToOpenAIConverter) buildClaudeStreamResponse(ctx wrapper.HttpCont
 			Delta: &claudeTextGenDelta{
 				Type:     "thinking_delta",
 				Thinking: reasoningText, // Use Thinking field, not Text
+			},
+		})
+		c.thinkingBlockHasText = true
+	}
+	if reasoningSignature != "" {
+		c.appendMessageStartIfNeeded(&responses, openaiResponse)
+		c.appendThinkingBlockStartIfNeeded(&responses)
+		if !c.thinkingBlockHasText {
+			responses = append(responses, &claudeTextGenStreamResponse{
+				Type:  "content_block_delta",
+				Index: &c.thinkingBlockIndex,
+				Delta: &claudeTextGenDelta{
+					Type:     "thinking_delta",
+					Thinking: "",
+				},
+			})
+			c.thinkingBlockHasText = true
+		}
+		log.Debugf("[OpenAI->Claude] Generated content_block_delta event with thinking signature")
+		responses = append(responses, &claudeTextGenStreamResponse{
+			Type:  "content_block_delta",
+			Index: &c.thinkingBlockIndex,
+			Delta: &claudeTextGenDelta{
+				Type:      "signature_delta",
+				Signature: reasoningSignature,
 			},
 		})
 	}
