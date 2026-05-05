@@ -21,6 +21,7 @@ type ClaudeToOpenAIConverter struct {
 	nextContentIndex     int
 	thinkingBlockIndex   int
 	thinkingBlockStarted bool
+	// Anthropic requires a thinking_delta before signature_delta within a thinking block.
 	thinkingBlockHasText bool
 	thinkingBlockStopped bool
 	textBlockIndex       int
