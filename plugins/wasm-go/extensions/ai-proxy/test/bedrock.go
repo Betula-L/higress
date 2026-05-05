@@ -1595,7 +1595,7 @@ func RunBedrockOnHttpResponseBodyTests(t *testing.T) {
 			require.Equal(t, types.HeaderStopIteration, action)
 
 			requestBody := `{
-				"model": "claude-sonnet-4-6",
+				"model": "anthropic.claude-3-5-haiku-20241022-v1:0",
 				"max_tokens": 1600,
 				"thinking": {
 					"type": "enabled",
@@ -1778,7 +1778,7 @@ func RunBedrockOnStreamingResponseBodyTests(t *testing.T) {
 			require.Equal(t, types.HeaderStopIteration, action)
 
 			requestBody := `{
-				"model": "claude-sonnet-4-6",
+				"model": "anthropic.claude-3-5-haiku-20241022-v1:0",
 				"max_tokens": 1600,
 				"thinking": {
 					"type": "enabled",
