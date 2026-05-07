@@ -33,6 +33,107 @@ type ClaudeToOpenAIConverter struct {
 	activeToolIndex *int                  // Currently active tool call index (for Claude serialization)
 }
 
+const (
+	ctxKeyClaudeNativeResponseContent   = "claudeNativeResponseContent"
+	ctxKeyClaudeNativeThinkingSignature = "claudeNativeThinkingSignature"
+	ctxKeyClaudeNativeStreamEvents      = "claudeNativeStreamEvents"
+	ctxKeyClaudeNativeRequestBody       = "claudeNativeRequestBody"
+)
+
+func getClaudeNativeResponseContent(ctx wrapper.HttpContext) ([]claudeTextGenContent, bool) {
+	if ctx == nil {
+		return nil, false
+	}
+	content, ok := ctx.GetContext(ctxKeyClaudeNativeResponseContent).([]claudeTextGenContent)
+	return content, ok && len(content) > 0
+}
+
+func getClaudeNativeThinkingSignature(ctx wrapper.HttpContext) (string, bool) {
+	if ctx == nil {
+		return "", false
+	}
+	signature, ok := ctx.GetContext(ctxKeyClaudeNativeThinkingSignature).(string)
+	return signature, ok && signature != ""
+}
+
+func appendClaudeNativeStreamEvent(ctx wrapper.HttpContext, event *claudeTextGenStreamResponse) {
+	if ctx == nil || event == nil {
+		return
+	}
+	events, _ := ctx.GetContext(ctxKeyClaudeNativeStreamEvents).([]*claudeTextGenStreamResponse)
+	ctx.SetContext(ctxKeyClaudeNativeStreamEvents, append(events, event))
+}
+
+func takeClaudeNativeStreamEvents(ctx wrapper.HttpContext) []*claudeTextGenStreamResponse {
+	if ctx == nil {
+		return nil
+	}
+	events, _ := ctx.GetContext(ctxKeyClaudeNativeStreamEvents).([]*claudeTextGenStreamResponse)
+	ctx.SetContext(ctxKeyClaudeNativeStreamEvents, nil)
+	return events
+}
+
+func writeClaudeStreamEvents(result *strings.Builder, events []*claudeTextGenStreamResponse) {
+	for _, event := range events {
+		data, err := json.Marshal(event)
+		if err != nil {
+			log.Errorf("unable to marshal claude stream response: %v", err)
+			continue
+		}
+		result.WriteString(fmt.Sprintf("event: %s\ndata: %s\n\n", event.Type, data))
+	}
+}
+
+func claudeContentFromOpenAIMessage(ctx wrapper.HttpContext, message *chatMessage) []claudeTextGenContent {
+	if nativeContent, ok := getClaudeNativeResponseContent(ctx); ok {
+		return nativeContent
+	}
+
+	var contents []claudeTextGenContent
+	var reasoningText string
+	if message.Reasoning != "" {
+		reasoningText = message.Reasoning
+	} else if message.ReasoningContent != "" {
+		reasoningText = message.ReasoningContent
+	}
+	if reasoningText != "" {
+		emptySignature := ""
+		contents = append(contents, claudeTextGenContent{
+			Type:      "thinking",
+			Signature: &emptySignature,
+			Thinking:  &reasoningText,
+		})
+		log.Debugf("[OpenAI->Claude] Added thinking content: %s", reasoningText)
+	}
+
+	if message.StringContent() != "" {
+		textContent := message.StringContent()
+		contents = append(contents, claudeTextGenContent{Type: "text", Text: &textContent})
+	}
+
+	for _, toolCall := range message.ToolCalls {
+		if toolCall.Function.IsEmpty() {
+			continue
+		}
+		var input map[string]interface{}
+		if toolCall.Function.Arguments != "" {
+			if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &input); err != nil {
+				log.Errorf("Failed to parse tool call arguments: %v, arguments: %s", err, toolCall.Function.Arguments)
+				input = map[string]interface{}{}
+			}
+		} else {
+			input = map[string]interface{}{}
+		}
+		contents = append(contents, claudeTextGenContent{
+			Type:  "tool_use",
+			Id:    toolCall.Id,
+			Name:  toolCall.Function.Name,
+			Input: &input,
+		})
+	}
+	return contents
+}
+
 // toolCallInfo tracks tool call state
 type toolCallInfo struct {
 	id                  string // Tool call ID
@@ -260,61 +361,7 @@ func (c *ClaudeToOpenAIConverter) ConvertOpenAIResponseToClaude(ctx wrapper.Http
 	if len(openaiResponse.Choices) > 0 {
 		choice := openaiResponse.Choices[0]
 		if choice.Message != nil {
-			var contents []claudeTextGenContent
-
-			// Add reasoning content (thinking) if present - check both reasoning and reasoning_content fields
-			var reasoningText string
-			if choice.Message.Reasoning != "" {
-				reasoningText = choice.Message.Reasoning
-			} else if choice.Message.ReasoningContent != "" {
-				reasoningText = choice.Message.ReasoningContent
-			}
-
-			if reasoningText != "" {
-				emptySignature := ""
-				contents = append(contents, claudeTextGenContent{
-					Type:      "thinking",
-					Signature: &emptySignature, // Use pointer for empty string
-					Thinking:  &reasoningText,
-				})
-				log.Debugf("[OpenAI->Claude] Added thinking content: %s", reasoningText)
-			}
-
-			// Add text content if present
-			if choice.Message.StringContent() != "" {
-				textContent := choice.Message.StringContent()
-				contents = append(contents, claudeTextGenContent{
-					Type: "text",
-					Text: &textContent,
-				})
-			}
-
-			// Add tool calls if present
-			if len(choice.Message.ToolCalls) > 0 {
-				for _, toolCall := range choice.Message.ToolCalls {
-					if !toolCall.Function.IsEmpty() {
-						// Parse arguments from JSON string to map
-						var input map[string]interface{}
-						if toolCall.Function.Arguments != "" {
-							if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &input); err != nil {
-								log.Errorf("Failed to parse tool call arguments: %v, arguments: %s", err, toolCall.Function.Arguments)
-								input = map[string]interface{}{}
-							}
-						} else {
-							input = map[string]interface{}{}
-						}
-
-						contents = append(contents, claudeTextGenContent{
-							Type:  "tool_use",
-							Id:    toolCall.Id,
-							Name:  toolCall.Function.Name,
-							Input: &input,
-						})
-					}
-				}
-			}
-
-			claudeResponse.Content = contents
+			claudeResponse.Content = claudeContentFromOpenAIMessage(ctx, choice.Message)
 		}
 
 		// Convert finish reason
@@ -445,18 +492,14 @@ func (c *ClaudeToOpenAIConverter) ConvertOpenAIStreamResponseToClaude(ctx wrappe
 			}
 
 			// Convert to Claude streaming format
+			if nativeEvents := takeClaudeNativeStreamEvents(ctx); len(nativeEvents) > 0 {
+				writeClaudeStreamEvents(&result, nativeEvents)
+				continue
+			}
 			claudeStreamResponses := c.buildClaudeStreamResponse(ctx, &openaiStreamResponse)
 			log.Debugf("[OpenAI->Claude] Generated %d Claude stream events from OpenAI chunk", len(claudeStreamResponses))
 
-			for i, claudeStreamResponse := range claudeStreamResponses {
-				responseData, err := json.Marshal(claudeStreamResponse)
-				if err != nil {
-					log.Errorf("unable to marshal claude stream response: %v", err)
-					continue
-				}
-				log.Debugf("[OpenAI->Claude] Stream event [%d/%d]: %s", i+1, len(claudeStreamResponses), string(responseData))
-				result.WriteString(fmt.Sprintf("event: %s\ndata: %s\n\n", claudeStreamResponse.Type, responseData))
-			}
+			writeClaudeStreamEvents(&result, claudeStreamResponses)
 		}
 	}
 
@@ -577,6 +620,34 @@ func (c *ClaudeToOpenAIConverter) buildClaudeStreamResponse(ctx wrapper.HttpCont
 				Thinking: reasoningText, // Use Thinking field, not Text
 			},
 		})
+	}
+
+	if signature, ok := getClaudeNativeThinkingSignature(ctx); ok {
+		if !c.thinkingBlockStarted || c.thinkingBlockStopped {
+			c.thinkingBlockIndex = c.nextContentIndex
+			c.nextContentIndex++
+			c.thinkingBlockStarted = true
+			c.thinkingBlockStopped = false
+			emptyStr := ""
+			responses = append(responses, &claudeTextGenStreamResponse{
+				Type:  "content_block_start",
+				Index: &c.thinkingBlockIndex,
+				ContentBlock: &claudeTextGenContent{
+					Type:      "thinking",
+					Signature: &emptyStr,
+					Thinking:  &emptyStr,
+				},
+			})
+		}
+		responses = append(responses, &claudeTextGenStreamResponse{
+			Type:  "content_block_delta",
+			Index: &c.thinkingBlockIndex,
+			Delta: &claudeTextGenDelta{
+				Type:      "signature_delta",
+				Signature: signature,
+			},
+		})
+		ctx.SetContext(ctxKeyClaudeNativeThinkingSignature, "")
 	}
 
 	// Handle content

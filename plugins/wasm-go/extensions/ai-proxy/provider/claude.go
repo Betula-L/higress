@@ -66,6 +66,7 @@ type claudeChatMessageContentSource struct {
 type claudeChatMessageContent struct {
 	Type         string                          `json:"type"`
 	Text         string                          `json:"text,omitempty"`
+	Data         string                          `json:"data,omitempty"` // For redacted_thinking
 	Source       *claudeChatMessageContentSource `json:"source,omitempty"`
 	CacheControl map[string]interface{}          `json:"cache_control,omitempty"`
 	// Tool use fields
@@ -75,6 +76,9 @@ type claudeChatMessageContent struct {
 	// Tool result fields
 	ToolUseId string                      `json:"tool_use_id,omitempty"` // For tool_result
 	Content   *claudeChatMessageContentWr `json:"content,omitempty"`     // For tool_result - can be string or array
+	IsError   bool                        `json:"is_error,omitempty"`    // For tool_result
+	Signature string                      `json:"signature,omitempty"`   // For thinking
+	Thinking  string                      `json:"thinking,omitempty"`    // For thinking
 }
 
 // UnmarshalJSON implements custom JSON unmarshaling for claudeChatMessageContentWr
@@ -239,6 +243,7 @@ type claudeTextGenResponse struct {
 type claudeTextGenContent struct {
 	Type      string                  `json:"type,omitempty"`
 	Text      *string                 `json:"text,omitempty"`      // Use pointer: empty string outputs "text":"", nil omits field
+	Data      string                  `json:"data,omitempty"`      // For redacted_thinking
 	Id        string                  `json:"id,omitempty"`        // For tool_use
 	Name      string                  `json:"name,omitempty"`      // For tool_use
 	Input     *map[string]interface{} `json:"input,omitempty"`     // Use pointer: empty map outputs "input":{}, nil omits field
@@ -272,6 +277,7 @@ type claudeTextGenDelta struct {
 	Type         string          `json:"type,omitempty"`
 	Text         string          `json:"text,omitempty"`
 	Thinking     string          `json:"thinking,omitempty"`
+	Signature    string          `json:"signature,omitempty"`
 	PartialJson  string          `json:"partial_json,omitempty"`
 	StopReason   *string         `json:"stop_reason,omitempty"`
 	StopSequence json.RawMessage `json:"stop_sequence,omitempty"` // Use RawMessage to output explicit null

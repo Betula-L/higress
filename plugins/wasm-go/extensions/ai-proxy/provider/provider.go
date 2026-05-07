@@ -1164,6 +1164,7 @@ func (c *ProviderConfig) handleRequestBody(
 	// If main.go detected a Claude request that needs conversion, convert the body
 	needClaudeConversion, _ := ctx.GetContext("needClaudeResponseConversion").(bool)
 	if needClaudeConversion {
+		ctx.SetContext(ctxKeyClaudeNativeRequestBody, body)
 		// Extract thinking config from original Claude body before conversion,
 		// so downstream providers (OpenRouter, ZhipuAI) can access it.
 		thinkingType := gjson.GetBytes(body, "thinking.type").String()
