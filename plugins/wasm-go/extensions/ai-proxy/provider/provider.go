@@ -198,6 +198,9 @@ const (
 	reasoningBehaviorIgnore      = "ignore"
 	reasoningBehaviorConcat      = "concat"
 
+	reasoningPassbackNone             = "none"
+	reasoningPassbackReasoningContent = "reasoning_content"
+
 	wildcard = "*"
 
 	defaultTimeout = 2 * 60 * 1000 // ms
@@ -328,6 +331,9 @@ type ProviderConfig struct {
 	// @Title zh-CN 推理内容处理方式
 	// @Description zh-CN 如何处理大模型服务返回的推理内容。目前支持以下取值：passthrough（正常输出推理内容）、ignore（不输出推理内容）、concat（将推理内容拼接在常规输出内容之前）。默认为 normal。仅支持通义千问服务。
 	reasoningContentMode string `required:"false" yaml:"reasoningContentMode" json:"reasoningContentMode"`
+	// @Title zh-CN 推理内容回传格式
+	// @Description zh-CN Claude 协议转换为 OpenAI 兼容协议时，向上游回传推理内容的格式。支持 none、reasoning_content；默认按供应商协议选择。
+	reasoningPassbackFormat string `required:"false" yaml:"reasoningPassbackFormat" json:"reasoningPassbackFormat"`
 	// @Title zh-CN 基于OpenAI协议的自定义后端URL
 	// @Description zh-CN 仅适用于支持 openai 协议的服务。
 	openaiCustomUrl string `required:"false" yaml:"openaiCustomUrl" json:"openaiCustomUrl"`
@@ -671,6 +677,18 @@ func (c *ProviderConfig) FromJson(json gjson.Result) {
 			// valid values, no action needed
 		default:
 			c.reasoningContentMode = reasoningBehaviorPassThrough
+		}
+	}
+	c.reasoningPassbackFormat = json.Get("reasoningPassbackFormat").String()
+	if c.reasoningPassbackFormat == "" {
+		c.reasoningPassbackFormat = defaultReasoningPassbackFormat(c.typ)
+	} else {
+		c.reasoningPassbackFormat = strings.ToLower(c.reasoningPassbackFormat)
+		switch c.reasoningPassbackFormat {
+		case reasoningPassbackNone, reasoningPassbackReasoningContent:
+			// valid values, no action needed
+		default:
+			c.reasoningPassbackFormat = defaultReasoningPassbackFormat(c.typ)
 		}
 	}
 
@@ -1245,7 +1263,7 @@ func (c *ProviderConfig) handleRequestBody(
 	}
 
 	if needClaudeConversion && provider.GetProviderType() != providerTypeBedrock && provider.GetProviderType() != providerTypeClaude {
-		body = stripClaudeInternalMessageFields(body)
+		body = stripClaudeInternalMessageFields(body, c.reasoningPassbackFormat == reasoningPassbackReasoningContent)
 	}
 
 	// use openai protocol (either original openai or converted from claude)
@@ -1281,7 +1299,16 @@ func (c *ProviderConfig) handleRequestBody(
 	return types.ActionContinue, replaceRequestBody(body)
 }
 
-func stripClaudeInternalMessageFields(body []byte) []byte {
+func defaultReasoningPassbackFormat(providerType string) string {
+	switch providerType {
+	case providerTypeDeepSeek, providerTypeMoonshot:
+		return reasoningPassbackReasoningContent
+	default:
+		return reasoningPassbackNone
+	}
+}
+
+func stripClaudeInternalMessageFields(body []byte, keepReasoningContent bool) []byte {
 	result := body
 	for _, field := range []string{"claude_thinking", "claude_output_config", "claude_anthropic_beta"} {
 		if updated, err := sjson.DeleteBytes(result, field); err == nil {
@@ -1304,6 +1331,9 @@ func stripClaudeInternalMessageFields(body []byte) []byte {
 		"claude_content_block_stop",
 	} {
 		messages.ForEach(func(key, _ gjson.Result) bool {
+			if keepReasoningContent && field == "reasoning_content" {
+				return true
+			}
 			if updated, err := sjson.DeleteBytes(result, fmt.Sprintf("messages.%d.%s", key.Int(), field)); err == nil {
 				result = updated
 			}

@@ -751,16 +751,60 @@ func TestStripClaudeInternalMessageFields(t *testing.T) {
 		}]
 	}`)
 
-	result := stripClaudeInternalMessageFields(body)
+	result := stripClaudeInternalMessageFields(body, true)
 
 	assert.False(t, gjson.GetBytes(result, "claude_thinking").Exists())
 	assert.False(t, gjson.GetBytes(result, "claude_output_config").Exists())
 	assert.False(t, gjson.GetBytes(result, "claude_anthropic_beta").Exists())
-	assert.False(t, gjson.GetBytes(result, "messages.0.reasoning_content").Exists())
+	assert.Equal(t, "reasoning", gjson.GetBytes(result, "messages.0.reasoning_content").String())
 	assert.False(t, gjson.GetBytes(result, "messages.0.reasoning_signature").Exists())
 	assert.False(t, gjson.GetBytes(result, "messages.0.reasoning_redacted_content").Exists())
 	assert.False(t, gjson.GetBytes(result, "messages.0.claude_content_blocks").Exists())
 	assert.False(t, gjson.GetBytes(result, "messages.0.claude_content_block_index").Exists())
 	assert.False(t, gjson.GetBytes(result, "messages.0.claude_content_block_stop").Exists())
 	assert.Equal(t, "answer", gjson.GetBytes(result, "messages.0.content").String())
+}
+
+func TestStripClaudeInternalMessageFieldsDropsReasoningContentForStrictProviders(t *testing.T) {
+	body := []byte(`{
+		"messages":[{
+			"role":"assistant",
+			"content":"answer",
+			"reasoning_content":"reasoning",
+			"reasoning_signature":"sig"
+		}]
+	}`)
+
+	result := stripClaudeInternalMessageFields(body, false)
+
+	assert.False(t, gjson.GetBytes(result, "messages.0.reasoning_content").Exists())
+	assert.False(t, gjson.GetBytes(result, "messages.0.reasoning_signature").Exists())
+	assert.Equal(t, "answer", gjson.GetBytes(result, "messages.0.content").String())
+}
+
+func TestReasoningPassbackFormatDefaults(t *testing.T) {
+	var moonshot ProviderConfig
+	moonshot.FromJson(gjson.Parse(`{"type":"moonshot"}`))
+	assert.Equal(t, reasoningPassbackReasoningContent, moonshot.reasoningPassbackFormat)
+
+	var deepseek ProviderConfig
+	deepseek.FromJson(gjson.Parse(`{"type":"deepseek"}`))
+	assert.Equal(t, reasoningPassbackReasoningContent, deepseek.reasoningPassbackFormat)
+
+	var openai ProviderConfig
+	openai.FromJson(gjson.Parse(`{"type":"openai"}`))
+	assert.Equal(t, reasoningPassbackNone, openai.reasoningPassbackFormat)
+
+	var minimax ProviderConfig
+	minimax.FromJson(gjson.Parse(`{"type":"minimax"}`))
+	assert.Equal(t, reasoningPassbackNone, minimax.reasoningPassbackFormat)
+}
+
+func TestReasoningPassbackFormatOverride(t *testing.T) {
+	var config ProviderConfig
+	config.FromJson(gjson.Parse(`{"type":"openai","reasoningPassbackFormat":"reasoning_content"}`))
+	assert.Equal(t, reasoningPassbackReasoningContent, config.reasoningPassbackFormat)
+
+	config.FromJson(gjson.Parse(`{"type":"moonshot","reasoningPassbackFormat":"none"}`))
+	assert.Equal(t, reasoningPassbackNone, config.reasoningPassbackFormat)
 }

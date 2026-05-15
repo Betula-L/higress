@@ -419,6 +419,42 @@ func TestClaudeToOpenAIConverter_ConvertClaudeRequestToOpenAI(t *testing.T) {
 		assert.Empty(t, *assistantMsg.ClaudeContentBlocks[1].Input)
 	})
 
+	t.Run("convert_thinking_with_tool_use_to_reasoning_content", func(t *testing.T) {
+		claudeRequest := `{
+			"model": "kimi-k2.6",
+			"messages": [{
+				"role": "assistant",
+				"content": [{
+					"type": "thinking",
+					"thinking": "I should call the tool before answering."
+				}, {
+					"type": "tool_use",
+					"id": "toolu_call",
+					"name": "run_command",
+					"input": {
+						"command": "pwd"
+					}
+				}]
+			}],
+			"max_tokens": 1000
+		}`
+
+		result, err := converter.ConvertClaudeRequestToOpenAI([]byte(claudeRequest))
+		require.NoError(t, err)
+
+		var raw map[string]any
+		require.NoError(t, json.Unmarshal(result, &raw))
+		messages, ok := raw["messages"].([]any)
+		require.True(t, ok)
+		require.Len(t, messages, 1)
+
+		assistantMsg, ok := messages[0].(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, "assistant", assistantMsg["role"])
+		assert.Equal(t, "I should call the tool before answering.", assistantMsg["reasoning_content"])
+		assert.Contains(t, assistantMsg, "tool_calls")
+	})
+
 	t.Run("convert_tool_result_to_tool_message", func(t *testing.T) {
 		// Test Claude tool_result conversion to OpenAI tool message format
 		claudeRequest := `{
